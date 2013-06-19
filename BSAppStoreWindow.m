@@ -24,6 +24,9 @@
 //
 
 #import "BSAppStoreWindow.h"
+
+#if BS_USE_PRIVATE_API
+
 #import "JRSwizzle.h"
 
 static CGFloat _defaultTitlebarHeight = 22.0;
@@ -105,6 +108,14 @@ static CGFloat _defaultTitlebarHeight = 22.0;
     return self = [super initWithContentRect:contentRect styleMask:aStyle backing:bufferingType defer:flag];
 }
 
+- (id)initWithContentRect:(NSRect)contentRect styleMask:(NSUInteger)aStyle backing:(NSBackingStoreType)bufferingType defer:(BOOL)flag screen:(NSScreen *)screen {
+    // default values
+    _titlebarHeight = _defaultTitlebarHeight;
+    _centerTitlebarButtons = NO;
+    
+    return self = [super initWithContentRect:contentRect styleMask:aStyle backing:bufferingType defer:flag screen:screen];
+}
+
 - (void)setTitlebarHeight:(CGFloat)titlebarHeight {
     _titlebarHeight = MAX(_defaultTitlebarHeight, titlebarHeight);
     [[[self contentView] superview] _resetTitleBarButtons];
@@ -116,3 +127,170 @@ static CGFloat _defaultTitlebarHeight = 22.0;
 }
 
 @end
+
+#else
+
+/** Minimum height of a toolbar item to increase the titlebar height */
+const CGFloat BSMinimumToolbarHeight = 11.0;
+
+@interface BSAppStoreWindow ()
+- (void)initialSetup;
+- (CGFloat)realTitlebarHeight;
+- (void)setupToolbar;
+- (void)layoutTitlebarButtons;
+@end
+
+@implementation BSAppStoreWindow
+
+- (id)initWithContentRect:(NSRect)contentRect styleMask:(NSUInteger)aStyle backing:(NSBackingStoreType)bufferingType defer:(BOOL)flag {
+    self = [super initWithContentRect:contentRect styleMask:aStyle backing:bufferingType defer:flag];
+    if (self) {
+        [self initialSetup];
+    }
+    
+    return self;
+}
+
+- (id)initWithContentRect:(NSRect)contentRect styleMask:(NSUInteger)aStyle backing:(NSBackingStoreType)bufferingType defer:(BOOL)flag screen:(NSScreen *)screen {
+    self = [super initWithContentRect:contentRect styleMask:aStyle backing:bufferingType defer:flag screen:screen];
+    if (self) {
+        [self initialSetup];
+    }
+    
+    return self;
+}
+
+- (void)initialSetup {
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(layoutTitlebarButtons) name:NSWindowDidResizeNotification object:self];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(layoutTitlebarButtons) name:NSWindowDidMoveNotification object:self];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(layoutTitlebarButtons) name:NSWindowDidEndSheetNotification object:self];
+    
+    // find titlebar height
+    _defaultTitlebarHeight = [self realTitlebarHeight];
+    
+    _item = [[NSToolbarItem alloc] initWithItemIdentifier:@"DummyToolbarItem"];
+    _view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1, 1)];
+    [_item setView:_view];
+    
+    [self setToolbar:[[NSToolbar alloc] initWithIdentifier:@"BSAppStoreWindowToolbar"]];
+    [self setTitlebarHeight:50.0];
+    [self setCenterTitlebarButtons:YES];
+}
+
+- (void)dealloc {
+    [_item bs_release];
+    [_view bs_release];
+    [super bs_dealloc];
+}
+
+- (void)setToolbar:(NSToolbar *)toolbar {
+    [super setToolbar:toolbar];
+    [self setupToolbar];
+}
+
+- (CGFloat)realTitlebarHeight {
+    CGFloat contentHeight = NSHeight([[self contentView] frame]);
+    CGFloat windowHeight = NSHeight([self frame]);
+    return windowHeight - contentHeight;
+}
+
+- (void)setupToolbar {
+    NSToolbar *toolbar = [self toolbar];
+    [toolbar setDelegate:self];
+    [toolbar setAllowsUserCustomization:NO];
+    [toolbar setAutosavesConfiguration:NO];
+    [toolbar setDisplayMode:NSToolbarDisplayModeIconOnly];
+    [toolbar setSizeMode:NSToolbarSizeModeDefault];
+    
+    // get height before adding item
+    _defaultToolbarHeight = [self realTitlebarHeight] - _defaultTitlebarHeight;
+    _titlebarHeight = _defaultTitlebarHeight + _defaultToolbarHeight;
+    
+    [self setTitlebarHeight:_titlebarHeight];
+}
+
+- (void)setTitlebarHeight:(CGFloat)titlebarHeight {
+    if (titlebarHeight < _defaultTitlebarHeight + _defaultToolbarHeight) {
+        NSLog(@"%@ titlebar height must be at least %f", NSStringFromSelector(_cmd), _defaultTitlebarHeight + _defaultToolbarHeight);
+    }
+    
+    _titlebarHeight = titlebarHeight;
+    
+    NSToolbar *toolbar = [self toolbar];
+    
+    // remove all current items
+    NSUInteger count = [[toolbar items] count];
+    for (NSUInteger i = 0; i < count; ++i) {
+        [toolbar removeItemAtIndex:i];
+    }
+    
+    [toolbar insertItemWithItemIdentifier:@"DummyToolbarItem" atIndex:0];
+}
+
+- (void)setCenterTitlebarButtons:(BOOL)centerTitlebarButtons {
+    _centerTitlebarButtons = centerTitlebarButtons;
+    [self layoutTitlebarButtons];
+}
+
+- (NSToolbarItem *)toolbarItemWithHeight:(CGFloat)height {
+    height = MAX(1.0, height - _defaultToolbarHeight - _defaultTitlebarHeight + BSMinimumToolbarHeight);
+    
+    NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:@"DummyToolbarItem"];
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1, height)];
+    [item setView:view];
+    [view bs_release];
+    
+    return [item bs_autorelease];
+}
+
+- (void)layoutTitlebarButtons {
+    if (!_centerTitlebarButtons) {
+        return;
+    }
+    
+    NSArray *siblings = [[[self contentView] superview] subviews];
+    
+    if ([siblings count] >= 3) {
+        NSView *closeButton = [siblings objectAtIndex:0];
+        NSRect closeButtonFrame = [closeButton frame];
+        
+        NSView *minimizeButton = [siblings objectAtIndex:2];
+        NSRect minimizeButtonFrame = [minimizeButton frame];
+        
+        NSView *zoomButton = [siblings objectAtIndex:1];
+        NSRect zoomButtonFrame = [zoomButton frame];
+        
+        if (![closeButton isKindOfClass:[NSButton class]] ||
+            ![minimizeButton isKindOfClass:[NSButton class]] ||
+            ![zoomButton isKindOfClass:[NSButton class]]) {
+            return;
+        }
+        
+        closeButtonFrame.origin.y = minimizeButtonFrame.origin.y = zoomButtonFrame.origin.y = NSHeight([self frame]) -
+        ([self realTitlebarHeight] + NSHeight(closeButtonFrame)) * 0.5;
+        
+        [[[self contentView] superview] viewWillStartLiveResize];
+        [closeButton setFrame:closeButtonFrame];
+        [minimizeButton setFrame:minimizeButtonFrame];
+        [zoomButton setFrame:zoomButtonFrame];
+        [[[self contentView] superview] viewDidEndLiveResize];
+    }
+}
+
+#pragma mark - Toolbar Delegate
+
+- (NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSString *)itemIdentifier willBeInsertedIntoToolbar:(BOOL)flag {
+    return [self toolbarItemWithHeight:_titlebarHeight];
+}
+
+- (NSArray *)toolbarDefaultItemIdentifiers:(NSToolbar*)toolbar {
+    return [NSArray arrayWithObject:@"DummyToolbarItem"];
+}
+
+- (NSArray *)toolbarAllowedItemIdentifiers:(NSToolbar*)toolbar {
+    return [NSArray arrayWithObject:@"DummyToolbarItem"];
+}
+
+@end
+
+#endif
